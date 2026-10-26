@@ -1,0 +1,105 @@
+<!--
+  fim_escalation_rules.xml — FIM privilege-escalation / persistence escalation for Wazuh 4.x.
+  https://github.com/secopsxsaiyan/wazuh-fim-escalation
+
+  Stock FIM rules treat every monitored-file change the same: 550 (modified), 553
+  (deleted), 554 (added), all level 7. A new NOPASSWD sudoers drop-in or a PAM backdoor
+  therefore lands at the same level as a routine package-update mtime touch — below a
+  typical level-10 triage/alerting gate, so nobody is paged.
+
+  These children re-rate changes to security-critical paths. Matching uses the documented
+  Wazuh FIM idiom: chain off the syscheck parents (550/553/554) and match the decoded
+  path via <field name="file">.
+
+  Level discipline (assumes an alerting gate at level 10):
+    - sudoers, SSH key files, Wazuh/SIEM credential material, auditd rule files -> L10
+      (genuinely rare / high-value).
+    - cron / PAM / shadow|passwd -> L8: elevated, indexed, MITRE-tagged, but kept BELOW
+      the gate because package installs touch /etc/cron.d and libpam updates touch
+      all /etc/pam.d/common-* at once (inode/mtime-only churn). L8 surfaces them on
+      dashboards without paging on the benign bursts.
+
+  ID ranges 100035-100039 and 101440-101441 (clear of stock Wazuh; 100030-100034 are skipped
+  because community rulesets commonly use them).
+
+  NOTE: these rules fire wherever FIM runs (agents, or the manager's own syscheck) and only
+  for paths listed in that host's <syscheck><directories>.
+-->
+<group name="syscheck,fim_escalation,">
+
+  <!-- /etc/sudoers and /etc/sudoers.d/* : add/modify/delete -> L10 (T1548.003). -->
+  <rule id="100035" level="10">
+    <if_sid>550,553,554</if_sid>
+    <field name="file">/etc/sudoers</field>
+    <description>FIM: /etc/sudoers(.d) changed — possible privilege-escalation persistence</description>
+    <mitre><id>T1548.003</id></mitre>
+    <group>fim_escalation,privilege_escalation,</group>
+  </rule>
+
+  <!-- cron config : elevated + indexed, below triage gate (package installs touch /etc/cron.d). -->
+  <rule id="100036" level="8">
+    <if_sid>550,553,554</if_sid>
+    <field name="file" type="pcre2">^/etc/cron(tab|\.d|\.hourly|\.daily|\.weekly|\.monthly)</field>
+    <description>FIM: cron configuration changed — possible scheduled-task persistence</description>
+    <mitre><id>T1053.003</id></mitre>
+    <group>fim_escalation,persistence,</group>
+  </rule>
+
+  <!-- PAM config : elevated, below triage gate (libpam updates touch all common-* at once). -->
+  <rule id="100037" level="8">
+    <if_sid>550,553,554</if_sid>
+    <field name="file">/etc/pam.d/</field>
+    <description>FIM: PAM configuration changed — authentication-stack change</description>
+    <mitre><id>T1556.003</id></mitre>
+    <group>fim_escalation,</group>
+  </rule>
+
+  <!-- /etc/shadow and /etc/passwd : elevated visibility (changes on every useradd/passwd/pkg). -->
+  <rule id="100038" level="8">
+    <if_sid>550,553,554</if_sid>
+    <field name="file" type="pcre2">^/etc/(g?shadow|g?passwd)$</field>
+    <description>FIM: core account database (passwd/shadow) modified</description>
+    <mitre><id>T1078</id></mitre>
+    <group>fim_escalation,</group>
+  </rule>
+
+  <!-- SSH authorized_keys / config / known_hosts: any change -> L10 (T1098.004).
+       The .ssh directories must be in syscheck <directories realtime="yes"> for this to fire.
+       Changes to authorized_keys are almost always persistence installs or key removal
+       covering tracks — both are high-value signals. -->
+  <rule id="100039" level="10">
+    <if_sid>550,553,554</if_sid>
+    <field name="file" type="pcre2">/\.ssh/(authorized_keys|config|known_hosts)$</field>
+    <description>FIM: SSH key file changed (.ssh/authorized_keys|config|known_hosts) — possible backdoor persistence</description>
+    <mitre><id>T1098.004</id></mitre>
+    <group>fim_escalation,persistence,ssh,</group>
+  </rule>
+
+  <!-- Wazuh / SIEM credential material changed or deleted -> L10 (T1552, T1485).
+       Ransomware operators and insiders tamper with (or steal) the SIEM's own keys and
+       credentials before acting: agent keys (client.keys), the enrollment password
+       (authd.pass), the manager's enrollment TLS key/cert, the indexer certificates and the
+       indexer security plugin's internal_users.yml. These paths are NOT in Wazuh's default
+       FIM scope — add them to the manager/indexer hosts' <syscheck> (see README). Extend the
+       regex with your own backup/secret paths. -->
+  <rule id="101440" level="10">
+    <if_sid>550,553,554</if_sid>
+    <field name="file" type="pcre2">^/var/ossec/etc/(client\.keys|authd\.pass|sslmanager\.(key|cert))$|^/etc/wazuh-indexer/certs/|/opensearch-security/internal_users\.yml$</field>
+    <description>FIM: Wazuh/SIEM credential material changed or deleted ($(file)) — possible credential theft or pre-ransomware tamper (verify intent).</description>
+    <mitre><id>T1552</id><id>T1485</id></mitre>
+    <group>fim_escalation,credential_access,</group>
+  </rule>
+
+  <!-- auditd rule files changed or deleted -> L10 (T1562.001). Attackers drop or rewrite
+       /etc/audit/rules.d before acting to blind syscall telemetry. Expected during a planned
+       audit-rule deployment; one outside a change window is the signal.
+       /etc/audit/rules.d must be in syscheck <directories> (realtime recommended). -->
+  <rule id="101441" level="10">
+    <if_sid>550,553,554</if_sid>
+    <field name="file" type="pcre2">^/etc/audit/rules\.d/</field>
+    <description>FIM: /etc/audit/rules.d changed or deleted ($(file)) — possible audit-trail tampering (impair defenses).</description>
+    <mitre><id>T1562.001</id></mitre>
+    <group>fim_escalation,audit_evasion,</group>
+  </rule>
+
+</group>
